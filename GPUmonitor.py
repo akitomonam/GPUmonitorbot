@@ -1,89 +1,77 @@
 import logging
 import argparse
 import time
+import settings
 
-from selenium import webdriver
+import slackweb
 
-URL = "https://slack.com/workspace-signin"
+import subprocess
+import json
+
+DEFAULT_ATTRIBUTES = (
+    'index',
+    'uuid',
+    'name',
+    'timestamp',
+    'memory.total',
+    'memory.free',
+    'memory.used',
+    'utilization.gpu',
+    'utilization.memory'
+)
 
 
-formatter = '%(levelname)s : %(asctime)s : %(message)s'
-logging.basicConfig(level=logging.INFO, format=formatter)
-
-class GPUmonitor():
-    def __init__(self, url):
-        self.url = url
+class GPUMonitor2Slack():
+    def __init__(self):
+        self.webhook_url = settings.WEBHOOK_URL
+        self.gpu_inf = list(dict())
+        self.message = ""
         
-    def open_driver(self):
-        # prepare web driver
-        self.options = webdriver.ChromeOptions()
-        # self.options.add_argument('--headless')
-        # self.options.add_argument("--disable-popup-blocking")
-        self.driver = webdriver.Chrome(options=self.options)
-        self.driver.get(self.url)
-        self.driver.implicitly_wait(100)
+    def slack_notify(self):
+        self.slack = slackweb.Slack(url=self.webhook_url)
+        self.slack.notify(text=self.message)
 
+    def get_gpu_info(self, nvidia_smi_path='nvidia-smi', keys=DEFAULT_ATTRIBUTES, no_units=True):
+        nu_opt = '' if not no_units else ',nounits'
+        cmd = '%s --query-gpu=%s --format=csv,noheader%s' % (nvidia_smi_path, ','.join(keys), nu_opt)
+        output = subprocess.check_output(cmd, shell=True)
+        lines = output.decode().split('\n')
+        lines = [ line.strip() for line in lines if line.strip() != '' ]
 
-    def close_driver(self):
-        self.driver.close()
+        self.gpu_inf = [ { k: v for k, v in zip(keys, line.split(', ')) } for line in lines ]
 
-    def quit_driver(self):
-        self.quit_driver()
-
-
-    def to_slack_start(self, workspace="", email="", password="", message=""):
-        self.workspace_url = "https://" + workspace + ".slack.com/"
-
-        # Open a driver
-        self.open_driver()
-
-        try:
-            self.driver.find_element_by_class_name("c-input_text").send_keys(workspace)
-            self.driver.find_element_by_class_name("c-button--large").click()
-            self.driver.find_element_by_id("email").send_keys(email)
-            self.driver.find_element_by_id("password").send_keys(password)
-            self.driver.find_element_by_id("signin_btn").click()
-            self.driver.get(self.workspace_url)
-            self.driver.get(self.workspace_url)
-
-            self.driver.switch_to.alert.dismiss()
-
-            self.driver.find_element_by_class_name("p-channel_sidebar__channel--im-you").click()
-
-            print(message)
-            self.driver.find_element_by_class_name("ql-editor").send_keys(message)
-            # self.driver.find_element_by_class_name("c-texty_input__button--send")
-        except:
-            logging.warning("slack workspace [{}] not found".format(workspace))
-
-        time.sleep(100)
-
-        # Quit the driver
-        self.quit_driver()
         return
+    
+    def set_gpu_info_to_message(self):
+        self.message = "\n".join(["\n".join([key+": "+gpu_info[key] for key in gpu_info.keys()]) for gpu_info in self.gpu_inf])
+        return
+
+    def set_text_to_message(self, text):
+        self.message = text
+        return
+
 
 if __name__ == "__main__":
     # define argments
     p = argparse.ArgumentParser()
-    p.add_argument("--url", default=URL)
-    p.add_argument("--slack_workspace", default="")
-    p.add_argument("--email", default="")
-    p.add_argument("--password", default="")
-    p.add_argument("--message", default="")
-    
+    p.add_argument("--interval", default="10")
 
     # parse argments
     args = p.parse_args()   
 
-    # Build a GPUmonitor instance 
-    gpumonitor = GPUmonitor(
-        url=args.url
-    )
+    # Build a GPUMonitor2Slack instance 
+    gpumonitor2slack = GPUMonitor2Slack()
 
-    # GPU monitoring start
-    gpumonitor.to_slack_start(
-        workspace=args.slack_workspace,
-        email=args.email,
-        password=args.password,
-        message=args.message
-    )
+    # start GPU monitoring
+    while True:
+        # get current gpu information
+        gpumonitor2slack.get_gpu_info()
+
+        # set gpu information as string to notify
+        gpumonitor2slack.set_gpu_info_to_message()
+
+        # Slack webhook notify
+        gpumonitor2slack.slack_notify()
+
+        # wait an interval time (minutes)
+        time.sleep(int(args.interval)*60)
